@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# macOS
+.DS_Store
+
+# Sensitive info
+.env
+
+# Data & Exports (Telegram exports)
+# Usually you don't want to commit large chat exports
+ChatExport_*/
+result.json
+*.json
+!config.json
+!*.example.json
+
+# Local artifacts/vaults
+/vault/
+/archivist_vault/
+
+# Logs
+*.log
+logs/
+
+# Local model cache
+/models/
+/.cache/
+
+# Media
+gui_screenshot.png
+*.png
+*.jpg
+*.jpeg
+*.mp3
+*.ogg
+*.mp4

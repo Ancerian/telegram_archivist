@@ -1,0 +1,7 @@
+faster-whisper
+google-generativeai
+anthropic
+openai
+langdetect
+requests
+python-dotenv
