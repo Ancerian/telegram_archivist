@@ -391,7 +391,7 @@ class ArchivistGUI:
             self.context_combo.grid()
             self.btn_auto_parallel.state(["!disabled"])
             self.hint_label.configure(
-                text="💡 Запустіть LM Studio → Local Server. Натисніть 'Авто' для визначення паралельності.")
+                text="💡 Увага: Значення 'Контекст моделі' тут має збігатися з налаштуванням Context Length у самій LM Studio! Натисніть 'Авто' для визначення потоків.")
             self._update_effective_context()
         else:
             self.key_entry.state(["!disabled"])
@@ -567,8 +567,8 @@ class ArchivistGUI:
             self._log_write("❌ Вкажіть назву моделі для LM Studio", "err")
             return
 
-        effective_max_tokens = 128000
-        absolute_max_tokens = 128000
+        effective_max_tokens = 16000
+        absolute_max_tokens = 32000
         if provider == "local":
             context_str = self.context_var.get()
             context_size = self.context_map.get(context_str, 12000)

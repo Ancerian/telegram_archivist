@@ -17,9 +17,11 @@ class SmartBatcher:
     def _estimate_tokens(msg: dict) -> int:
         text = msg.get("text") or ""
         transcript = msg.get("transcript") or ""
-        tokens = len(text.split()) * 1.5
+        # Cyrillic tokenization is often 2.5 - 4 tokens per word for local models.
+        # Adding 20 tokens overhead for date, name, and formatting per message.
+        tokens = len(text.split()) * 3.0 + 20
         if transcript:
-            tokens += len(transcript.split()) * 1.5
+            tokens += len(transcript.split()) * 3.0
         return tokens
 
     @staticmethod
@@ -167,8 +169,19 @@ class EntityAnalyzer:
         """
         import concurrent.futures
         import time
+        from config import SYSTEM_PROMPT
+        
+        # Оцінюємо розмір статичного оверхеду (системний промпт + вже знайдені сутності)
+        # Рахуємо приблизно 3 токени на слово для кирилиці
+        system_words = len(SYSTEM_PROMPT.split())
+        entities_words = len(json.dumps(known_entities, ensure_ascii=False).split())
+        static_overhead_tokens = int((system_words + entities_words) * 3.0) + 500 # 500 запас
+        
+        # Віднімаємо цей оверхед від цільового розміру батчу
+        actual_max_tokens = max(1000, self.max_tokens - static_overhead_tokens)
+        actual_absolute_tokens = max(1000, self.absolute_max_tokens - static_overhead_tokens)
 
-        batch_list = SmartBatcher.split_by_context(messages, self.max_tokens, self.absolute_max_tokens)
+        batch_list = SmartBatcher.split_by_context(messages, actual_max_tokens, actual_absolute_tokens)
         total_batches = len(batch_list)
         total_tokens = sum(sum(SmartBatcher._estimate_tokens(m) for m in b["messages"]) for b in batch_list)
 
@@ -202,6 +215,24 @@ class EntityAnalyzer:
                     
                 accumulated = checkpoint.get("accumulated", accumulated)
                 processed_batch_nums = set(checkpoint.get("processed_batches", []))
+                
+                removed_count = 0
+                for k in ["people", "projects", "events", "themes"]:
+                    if k in accumulated and isinstance(accumulated[k], list):
+                        key_name = "tag" if k == "themes" else "name"
+                        valid_items = []
+                        for item in accumulated[k]:
+                            if isinstance(item, dict) and item.get(key_name):
+                                valid_items.append(item)
+                            else:
+                                removed_count += 1
+                        accumulated[k] = valid_items
+                
+                if removed_count > 0:
+                    clean_msg = f"  🧹 Очищено {removed_count} битих сутностей з кешу"
+                    print(clean_msg)
+                    if self.progress_callback:
+                        self.progress_callback(clean_msg)
                 
                 msg = f"  🔄 Відновлено прогрес: {len(processed_batch_nums)}/{total_batches} батчів"
                 print(msg)
@@ -276,9 +307,9 @@ class EntityAnalyzer:
                 except Exception as e:
                     err_str = str(e)
                     should_split = False
-                    if ("Context size" in err_str or "context_length_exceeded" in err_str):
+                    if ("Context size" in err_str or "context_length_exceeded" in err_str or "payload" in err_str.lower()):
                         should_split = True
-                        warn_msg = f"  ⚠️ Батч {b_num}: контекст переповнено, розділяю навпіл..."
+                        warn_msg = f"  ⚠️ Батч {b_num}: контекст переповнено. Розділяю навпіл...\n      Деталі: {err_str}"
                         
                     if should_split and len(batch) > 1:
                         mid = len(batch) // 2
@@ -398,9 +429,14 @@ class EntityAnalyzer:
         
         # Фаза 2: Величезні батчі
         if huge_batches and (not self.is_running_callback or self.is_running_callback()):
-            if self.progress_callback:
-                self.progress_callback("  ▶ Фаза 2: Величезні батчі (примусово 1 потік)")
-            run_queue(huge_batches, force_max=1)
+            if self.provider == "local":
+                if self.progress_callback:
+                    self.progress_callback("  ▶ Фаза 2: Величезні батчі (примусово 1 потік для LM Studio)")
+                run_queue(huge_batches, force_max=1)
+            else:
+                if self.progress_callback:
+                    self.progress_callback("  ▶ Фаза 2: Величезні батчі (динамічна паралельність)")
+                run_queue(huge_batches)
 
         # Видаляємо чекпоінт після успішного завершення
         if processed_count >= total_batches and checkpoint_path and checkpoint_path.exists():
@@ -559,9 +595,21 @@ class EntityAnalyzer:
         """Валідує та виправляє JSON з відповіді LLM."""
         
         def _ensure_keys(parsed_dict: dict) -> dict:
+            filtered_count = 0
             for k in ["people", "projects", "events", "themes"]:
                 if k not in parsed_dict or not isinstance(parsed_dict[k], list):
                     parsed_dict[k] = []
+                else:
+                    valid_items = []
+                    key_name = "tag" if k == "themes" else "name"
+                    for item in parsed_dict[k]:
+                        if isinstance(item, dict) and item.get(key_name):
+                            valid_items.append(item)
+                        else:
+                            filtered_count += 1
+                    parsed_dict[k] = valid_items
+            if filtered_count > 0 and self.progress_callback:
+                self.progress_callback(f"  ⚠️ Відфільтровано {filtered_count} сутність(ей) без імені в батчі {batch_num}")
             return parsed_dict
 
         # Крок 1: Прямий парсинг
@@ -643,28 +691,28 @@ class EntityAnalyzer:
                 accumulated[key] = []
 
         for person in (batch_result.get("people") or []):
-            existing = self._find_in_list(accumulated["people"], person.get("name", ""), "name")
+            existing = self._find_in_list(accumulated["people"], person.get("name") or "", "name")
             if existing is not None:
                 self._merge_person(accumulated["people"][existing], person)
             else:
                 accumulated["people"].append(person)
 
         for project in (batch_result.get("projects") or []):
-            existing = self._find_in_list(accumulated["projects"], project.get("name", ""), "name")
+            existing = self._find_in_list(accumulated["projects"], project.get("name") or "", "name")
             if existing is not None:
                 self._merge_simple_entity(accumulated["projects"][existing], project)
             else:
                 accumulated["projects"].append(project)
 
         for event in (batch_result.get("events") or []):
-            existing = self._find_in_list(accumulated["events"], event.get("name", ""), "name")
+            existing = self._find_in_list(accumulated["events"], event.get("name") or "", "name")
             if existing is not None:
                 self._merge_simple_entity(accumulated["events"][existing], event)
             else:
                 accumulated["events"].append(event)
 
         for theme in (batch_result.get("themes") or []):
-            existing = self._find_in_list(accumulated["themes"], theme.get("tag", ""), "tag")
+            existing = self._find_in_list(accumulated["themes"], theme.get("tag") or "", "tag")
             if existing is not None:
                 accumulated["themes"][existing]["message_count"] = (
                     accumulated["themes"][existing].get("message_count", 0) +
@@ -681,7 +729,7 @@ class EntityAnalyzer:
         if not name: return None
         name_lower = name.lower().strip()
         for i, item in enumerate(items):
-            if item.get(key, "").lower().strip() == name_lower:
+            if (item.get(key) or "").lower().strip() == name_lower:
                 return i
         return None
 
