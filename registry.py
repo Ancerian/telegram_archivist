@@ -3,10 +3,27 @@ registry.py — Керування реєстром сутностей (_registr
 """
 
 import json
+import re
 from pathlib import Path
 from difflib import SequenceMatcher
 
-from config import slugify, transliterate, higher_confidence
+from config import slugify, transliterate, higher_confidence, normalize_name
+
+
+def sanitize_tag(tag: str) -> str:
+    if not tag:
+        return ""
+    # Якщо tag є dict — витягти поле tag
+    if isinstance(tag, dict):
+        tag = tag.get("tag") or tag.get("name") or ""
+    tag = str(tag).strip().lower()
+    # Замінити пробіли і підкреслення на дефіс
+    tag = re.sub(r'[\s_]+', '-', tag)
+    # Прибрати всі символи крім букв, цифр, дефіса
+    tag = re.sub(r'[^\w\-]', '', tag)
+    # Прибрати множинні дефіси
+    tag = re.sub(r'-+', '-', tag).strip('-')
+    return tag
 
 
 class IdentityRegistry:
@@ -45,8 +62,8 @@ class IdentityRegistry:
         """
         Пошук за пріоритетом:
         1. Збіг telegram_id
-        2. Точний збіг canonical_name або aliases (case-insensitive)
-        3. Нечіткий збіг через SequenceMatcher з порогом 0.85
+        2. Точний збіг нормалізованого імені
+        3. Нечіткий збіг через SequenceMatcher з порогом 0.80
         """
         people = self.data.get("people", {})
 
@@ -56,22 +73,20 @@ class IdentityRegistry:
                 if telegram_id in person.get("telegram_ids", []):
                     return key
 
-        # 2. Точний збіг (case-insensitive)
-        name_lower = name.lower().strip()
-        name_translit = transliterate(name).lower().strip()
+        # 2. Точний збіг нормалізованого імені
+        from config import normalize_name
+        name_norm = normalize_name(name)
+        if not name_norm:
+            return None
 
         for key, person in people.items():
             # Перевірка canonical_name
-            if person.get("canonical_name", "").lower().strip() == name_lower:
-                return key
-            if transliterate(person.get("canonical_name", "")).lower().strip() == name_translit:
+            if normalize_name(person.get("canonical_name", "")) == name_norm:
                 return key
 
             # Перевірка aliases
             for alias in person.get("aliases", []):
-                if alias.lower().strip() == name_lower:
-                    return key
-                if transliterate(alias).lower().strip() == name_translit:
+                if normalize_name(alias) == name_norm:
                     return key
 
         # 3. Нечіткий збіг
@@ -81,35 +96,35 @@ class IdentityRegistry:
         for key, person in people.items():
             candidates = [person.get("canonical_name", "")] + person.get("aliases", [])
             for candidate in candidates:
-                # Порівнюємо і оригінал, і транслітерацію
-                for a, b in [
-                    (name_lower, candidate.lower()),
-                    (name_translit, transliterate(candidate).lower()),
-                ]:
-                    ratio = SequenceMatcher(None, a, b).ratio()
-                    if ratio > best_ratio:
-                        best_ratio = ratio
-                        best_match = key
+                cand_norm = normalize_name(candidate)
+                if not cand_norm: continue
 
-        if best_ratio >= 0.85 and best_match:
+                ratio = SequenceMatcher(None, name_norm, cand_norm).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_match = key
+
+        if best_ratio >= 0.80 and best_match:
             return best_match
 
         return None
 
     def find_entity(self, entity_type: str, name: str) -> str | None:
-        """Пошук сутності за типом і назвою."""
+        """Пошук сутності за типом і нормалізованою назвою."""
         entities = self.data.get(entity_type, {})
-        name_lower = name.lower().strip()
-        name_translit = transliterate(name).lower().strip()
+        from config import normalize_name
+        if entity_type == "themes":
+            name = sanitize_tag(name)
+        name_norm = normalize_name(name)
+        if not name_norm:
+            return None
 
         # Точний збіг
         for key, entity in entities.items():
-            if entity.get("canonical_name", "").lower().strip() == name_lower:
-                return key
-            if transliterate(entity.get("canonical_name", "")).lower().strip() == name_translit:
+            if normalize_name(entity.get("canonical_name", "")) == name_norm:
                 return key
             for alias in entity.get("aliases", []):
-                if alias.lower().strip() == name_lower:
+                if normalize_name(alias) == name_norm:
                     return key
 
         # Нечіткий збіг
@@ -119,22 +134,21 @@ class IdentityRegistry:
         for key, entity in entities.items():
             candidates = [entity.get("canonical_name", "")] + entity.get("aliases", [])
             for candidate in candidates:
-                for a, b in [
-                    (name_lower, candidate.lower()),
-                    (name_translit, transliterate(candidate).lower()),
-                ]:
-                    ratio = SequenceMatcher(None, a, b).ratio()
-                    if ratio > best_ratio:
-                        best_ratio = ratio
-                        best_match = key
+                cand_norm = normalize_name(candidate)
+                if not cand_norm: continue
 
-        if best_ratio >= 0.85 and best_match:
+                ratio = SequenceMatcher(None, name_norm, cand_norm).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_match = key
+
+        if best_ratio >= 0.80 and best_match:
             return best_match
 
         return None
 
     def add_person(self, data: dict) -> str:
-        """Додає нову людину до реєстру."""
+        """Додає нову людину до реєстру (з повним досьє)."""
         name = data.get("canonical_name", data.get("name", "Unknown"))
         key = slugify(name)
 
@@ -151,12 +165,19 @@ class IdentityRegistry:
             "telegram_ids": data.get("telegram_ids", []),
             "file": f"People/{name}.md",
             "sources": data.get("sources", []),
+            "data": data.get("full_dossier", {})  # Зберігаємо повне досьє
         }
         return key
 
     def add_entity(self, entity_type: str, data: dict) -> str:
-        """Додає нову сутність до реєстру."""
+        """Додає нову сутність до реєстру (з повним досьє)."""
         name = data.get("canonical_name", data.get("name", "Unknown"))
+        if entity_type == "themes":
+            name = sanitize_tag(name)
+            full_dossier = data.get("full_dossier", {}) or {}
+            if isinstance(full_dossier, dict):
+                full_dossier["tag"] = sanitize_tag(full_dossier.get("tag") or name)
+                data["full_dossier"] = full_dossier
         key = slugify(name)
 
         original_key = key
@@ -179,6 +200,7 @@ class IdentityRegistry:
             "aliases": data.get("aliases", []),
             "file": f"{folder_map.get(entity_type, entity_type)}/{name}.md",
             "sources": data.get("sources", []),
+            "data": data.get("full_dossier", {})  # Зберігаємо повне досьє
         }
         return key
 
@@ -246,6 +268,6 @@ class IdentityRegistry:
             result["known_events"].append(event.get("canonical_name", key))
 
         for key, theme in self.data.get("themes", {}).items():
-            result["known_themes"].append(theme.get("canonical_name", key))
+            result["known_themes"].append(sanitize_tag(theme.get("canonical_name", key)))
 
         return result

@@ -5,3 +5,5 @@ openai
 langdetect
 requests
 python-dotenv
+tiktoken  # optional, для точного підрахунку токенів OpenAI
+pytest  # для unit-тестів

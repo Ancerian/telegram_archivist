@@ -3,7 +3,7 @@ merger.py — Мерж результатів аналізу з існуючим
 """
 
 from config import slugify, higher_confidence
-from registry import IdentityRegistry
+from registry import IdentityRegistry, sanitize_tag
 
 
 class EntityMerger:
@@ -35,19 +35,28 @@ class EntityMerger:
 
             if canonical_key:
                 # Оновити
-                existing_data = self._get_existing_person_data(canonical_key)
+                existing_entry = self.registry.data["people"].get(canonical_key, {})
+                existing_data = existing_entry.get("data", {})
+
+                # Якщо в реєстрі немає даних (старий формат), ініціалізуємо базовими полями
+                if not existing_data:
+                    existing_data = {"name": existing_entry.get("canonical_name", name)}
+
                 merged_data = merge_entity_data(existing_data, person)
                 merged_data["_chat_source"] = chat_name
 
-                # Оновити реєстр
+                # Оновити реєстр (метадані + повне досьє)
                 nicknames = person.get("identity", {}).get("nicknames", []) or []
                 aliases = list(set(nicknames + [name]))
                 tg_ids = [telegram_id] if telegram_id else []
+
                 self.registry.update_person(canonical_key, {
                     "aliases": aliases,
                     "telegram_ids": tg_ids,
                     "sources": [chat_name],
                 })
+                # Зберігаємо оновлене досьє
+                self.registry.data["people"][canonical_key]["data"] = merged_data
 
                 merge_report["people"].append({
                     "action": "update",
@@ -59,14 +68,17 @@ class EntityMerger:
                 nicknames = person.get("identity", {}).get("nicknames", []) or []
                 aliases = list(set(nicknames + [name]))
                 tg_ids = [telegram_id] if telegram_id else []
+
+                person["_chat_source"] = chat_name
+
                 canonical_key = self.registry.add_person({
                     "canonical_name": name,
                     "aliases": aliases,
                     "telegram_ids": tg_ids,
                     "sources": [chat_name],
+                    "full_dossier": person
                 })
 
-                person["_chat_source"] = chat_name
                 merge_report["people"].append({
                     "action": "create",
                     "canonical_key": canonical_key,
@@ -79,7 +91,11 @@ class EntityMerger:
             canonical_key = self.registry.find_entity("projects", name)
 
             if canonical_key:
-                existing_data = self._get_existing_entity_data("projects", canonical_key)
+                existing_entry = self.registry.data["projects"].get(canonical_key, {})
+                existing_data = existing_entry.get("data", {})
+                if not existing_data:
+                    existing_data = {"name": existing_entry.get("canonical_name", name)}
+
                 merged_data = merge_entity_data(existing_data, project)
                 merged_data["_chat_source"] = chat_name
 
@@ -87,6 +103,7 @@ class EntityMerger:
                     "aliases": [],
                     "sources": [chat_name],
                 })
+                self.registry.data["projects"][canonical_key]["data"] = merged_data
 
                 merge_report["projects"].append({
                     "action": "update",
@@ -94,13 +111,14 @@ class EntityMerger:
                     "data": merged_data,
                 })
             else:
+                project["_chat_source"] = chat_name
                 canonical_key = self.registry.add_entity("projects", {
                     "canonical_name": name,
                     "aliases": [],
                     "sources": [chat_name],
+                    "full_dossier": project
                 })
 
-                project["_chat_source"] = chat_name
                 merge_report["projects"].append({
                     "action": "create",
                     "canonical_key": canonical_key,
@@ -113,7 +131,11 @@ class EntityMerger:
             canonical_key = self.registry.find_entity("events", name)
 
             if canonical_key:
-                existing_data = self._get_existing_entity_data("events", canonical_key)
+                existing_entry = self.registry.data["events"].get(canonical_key, {})
+                existing_data = existing_entry.get("data", {})
+                if not existing_data:
+                    existing_data = {"name": existing_entry.get("canonical_name", name)}
+
                 merged_data = merge_entity_data(existing_data, event)
                 merged_data["_chat_source"] = chat_name
 
@@ -121,6 +143,7 @@ class EntityMerger:
                     "aliases": [],
                     "sources": [chat_name],
                 })
+                self.registry.data["events"][canonical_key]["data"] = merged_data
 
                 merge_report["events"].append({
                     "action": "update",
@@ -128,13 +151,14 @@ class EntityMerger:
                     "data": merged_data,
                 })
             else:
+                event["_chat_source"] = chat_name
                 canonical_key = self.registry.add_entity("events", {
                     "canonical_name": name,
                     "aliases": [],
                     "sources": [chat_name],
+                    "full_dossier": event
                 })
 
-                event["_chat_source"] = chat_name
                 merge_report["events"].append({
                     "action": "create",
                     "canonical_key": canonical_key,
@@ -143,23 +167,32 @@ class EntityMerger:
 
         # Themes
         for theme in (analyzed_entities.get("themes") or []):
-            tag = theme.get("tag", "unknown")
+            if not isinstance(theme, dict):
+                theme = {"tag": theme}
+            tag = sanitize_tag(theme.get("tag") or theme.get("name") or "unknown")
+            theme["tag"] = tag
             canonical_key = self.registry.find_entity("themes", tag)
 
             if canonical_key:
-                existing_data = self._get_existing_entity_data("themes", canonical_key)
+                existing_entry = self.registry.data["themes"].get(canonical_key, {})
+                existing_data = existing_entry.get("data", {})
+                if not existing_data:
+                    existing_data = {"tag": existing_entry.get("canonical_name", tag)}
+
                 merged_data = merge_entity_data(existing_data, theme)
                 # Сумувати message_count
                 merged_data["message_count"] = (
                     (existing_data.get("message_count") or 0) +
                     (theme.get("message_count") or 0)
                 )
+                merged_data["tag"] = sanitize_tag(merged_data.get("tag") or tag)
                 merged_data["_chat_source"] = chat_name
 
                 self.registry.update_entity("themes", canonical_key, {
                     "aliases": [],
                     "sources": [chat_name],
                 })
+                self.registry.data["themes"][canonical_key]["data"] = merged_data
 
                 merge_report["themes"].append({
                     "action": "update",
@@ -167,13 +200,14 @@ class EntityMerger:
                     "data": merged_data,
                 })
             else:
+                theme["_chat_source"] = chat_name
                 canonical_key = self.registry.add_entity("themes", {
                     "canonical_name": tag,
                     "aliases": [],
                     "sources": [chat_name],
+                    "full_dossier": theme
                 })
 
-                theme["_chat_source"] = chat_name
                 merge_report["themes"].append({
                     "action": "create",
                     "canonical_key": canonical_key,
@@ -183,20 +217,14 @@ class EntityMerger:
         return merge_report
 
     def _get_existing_person_data(self, canonical_key: str) -> dict:
-        """Отримує існуючі дані з реєстру (базові)."""
+        """Застарілий метод."""
         person = self.registry.data.get("people", {}).get(canonical_key, {})
-        return {
-            "name": person.get("canonical_name", ""),
-            "sources": person.get("sources", []),
-        }
+        return person.get("data", {})
 
     def _get_existing_entity_data(self, entity_type: str, canonical_key: str) -> dict:
-        """Отримує існуючі дані сутності з реєстру."""
+        """Застарілий метод."""
         entity = self.registry.data.get(entity_type, {}).get(canonical_key, {})
-        return {
-            "name": entity.get("canonical_name", ""),
-            "sources": entity.get("sources", []),
-        }
+        return entity.get("data", {})
 
 
 def merge_entity_data(existing: dict, new: dict) -> dict:
@@ -248,7 +276,7 @@ def merge_entity_data(existing: dict, new: dict) -> dict:
         elif key == "message_count":
             result[key] = (existing_val or 0) + (new_val or 0)
         else:
-            if existing_val is None or existing_val == "" or existing_val == "невідомо":
+            if existing_val is None or existing_val == "" or existing_val == "невідомо" or existing_val == "null":
                 result[key] = new_val
 
     # Обнулити uncertainty_note якщо confidence виріс до high

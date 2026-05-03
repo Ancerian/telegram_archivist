@@ -5,6 +5,7 @@ parser.py — Парсинг експорту Telegram Desktop.
 import json
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 try:
     from langdetect import detect, LangDetectException
@@ -92,6 +93,19 @@ class TelegramParser:
 
         return self._messages
 
+    def get_new_messages(self, since: datetime) -> list:
+        """Повертає повідомлення після вказаної дати."""
+        if since is None:
+            return self.get_messages()
+
+        since_dt = self._normalize_datetime(since)
+        new_messages = []
+        for msg in self.get_messages():
+            msg_dt = self._parse_datetime(msg.get("date"))
+            if msg_dt and msg_dt > since_dt:
+                new_messages.append(msg)
+        return new_messages
+
     def get_chat_language(self) -> str:
         """
         Визначає переважну мову чату через langdetect
@@ -149,3 +163,18 @@ class TelegramParser:
             return "".join(parts)
 
         return str(text_field) if text_field else ""
+
+    @staticmethod
+    def _parse_datetime(value) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return TelegramParser._normalize_datetime(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_datetime(value: datetime) -> datetime:
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
