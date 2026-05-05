@@ -1,61 +1,89 @@
-# 🗄 Telegram Archivist
+# Telegram Archivist
 
-**Telegram Archivist** — це потужний інструмент для перетворення експортованих чатів Telegram у структуровану базу знань (Second Brain) в **Obsidian**.
+🗄 **Автоматичний аналіз Telegram чатів з генерацією Obsidian vault.**
 
-Він автоматично аналізує переписку за допомогою LLM (Gemini, Claude, GPT-4 або локальні моделі через LM Studio), витягує факти про людей, проекти та події, а також транскрибує голосові повідомлення.
+## 🚀 Можливості
 
-![GUI Screenshot](gui_screenshot.png)
+- **Аналіз через LLM** — підтримка Google Gemini, Anthropic Claude, OpenAI, LM Studio (локальна)
+- **Розширений парсинг** — підтримка reply, forward, edited, сервісних повідомлень
+- **Розширена схема досьє** — активність, соціальна динаміка, digital профіль, timeline
+- **Транскрипція медіа** — голосові і відеоповідомлення через faster-whisper
+- **Obsidian vault** — генерація markdown-файлів з Entity linking
+- **Граф зв'язків** — автоматична генерація Canvas графу
+- **Дедуплікація** — злиття дублікатів сутностей
+- **Multi-chat** — підтримка порівняння кількох чатів
+- **Інкрементальний режим** — аналіз тільки нових повідомлень
+- **Health check** — перевірка системи перед запуском
+- **FAISS пошук** — семантичний пошук по реєстру (optional)
 
-## ✨ Особливості
-
-- 📝 **Розумний аналіз**: Витягує досьє на людей, опис проектів та хронологію подій.
-- 🎙 **Транскрипція**: Автоматичне перетворення голосових та відео-повідомлень у текст за допомогою `faster-whisper`.
-- 🧠 **Мульти-модельність**: Підтримка Google Gemini, Anthropic Claude, OpenAI та будь-яких локальних моделей через LM Studio.
-- 📂 **Obsidian Integration**: Створює готові Markdown-файли з перехресними посиланнями, тегами та метаданими.
-- 🌒 **Modern GUI**: Зручний графічний інтерфейс з темною темою.
-- 🚀 **Smart Batching**: Інтелектуальне розбиття довгих чатів на батчі з урахуванням лімітів контексту моделі.
-
-## 🚀 Швидкий старт
-
-### 1. Встановлення залежностей
+## 📋 Встановлення
 
 ```bash
-# Створіть віртуальне середовище
-python -m venv .venv
-source .venv/bin/activate  # для macOS/Linux
-
-# Встановіть бібліотеки
 pip install -r requirements.txt
 ```
 
-*Примітка: Для роботи GUI на macOS може знадобитися `brew install python-tk`.*
+### Опціональні залежності
 
-### 2. Налаштування
+```bash
+pip install jinja2        # Шаблони
+pip install psutil        # Health check RAM
+pip install faiss-cpu sentence-transformers  # Векторний пошук
+```
 
-1. Скопіюйте `.env.example` у `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-2. Додайте ваші API ключі у файл `.env`.
+## 🖥 Використання
 
-### 3. Запуск
-
-Ви можете запустити версію з графічним інтерфейсом:
+### GUI
 ```bash
 python gui.py
 ```
 
-Або використовувати CLI:
+### CLI
 ```bash
-python main.py --input /path/to/telegram/export --vault /path/to/obsidian/vault --provider google
+python main.py --input ./ChatExport --vault ./MyVault --provider google --api-key $GOOGLE_API_KEY
 ```
 
-## 🛠 Технологічний стек
+## 📁 Структура проєкту
 
-- **Python 3.10+**
-- **LLM SDKs**: `google-generativeai`, `anthropic`, `openai`
-- **Transcription**: `faster-whisper`
-- **GUI**: `tkinter` (custom themed)
-- **Data**: JSON Parsing & Markdown generation
+| Файл | Призначення |
+|---|---|
+| `gui.py` | Графічний інтерфейс (tkinter) |
+| `analyzer.py` | Ядро LLM аналізу, SmartBatcher |
+| `parser.py` | Парсер Telegram експортів |
+| `writer.py` | Генерація Obsidian markdown |
+| `registry.py` | Реєстр сутностей |
+| `merger.py` | Злиття даних |
+| `deduplicator.py` | Дедуплікація vault |
+| `transcriber.py` | Транскрипція через Whisper |
+| `config.py` | Конфігурація, system prompt |
+| `health_check.py` | Перевірка системи |
+| `comparator.py` | Multi-chat порівняння |
+| `vector_registry.py` | FAISS пошук (optional) |
+| `merge_to_txt.py` | Експорт чату в .txt |
 
+## 🧪 Тестування
 
+```bash
+python -m pytest tests/ -v
+```
+
+## 📊 Архітектура
+
+```
+Telegram Export → Parser → SmartBatcher → LLM Analyzer → Merger → Registry → Writer → Obsidian Vault
+                                                                                    → Canvas Graph
+                                                                                    → Chat Summary
+```
+
+## ⚙️ Налаштування
+
+Налаштування зберігаються автоматично в `~/.telegram_archivist_settings.json`.
+
+### Змінні середовища
+
+- `GOOGLE_API_KEY` — ключ Google Gemini
+- `ANTHROPIC_API_KEY` — ключ Anthropic
+- `OPENAI_API_KEY` — ключ OpenAI
+
+## 📝 Ліцензія
+
+MIT

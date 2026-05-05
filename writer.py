@@ -126,6 +126,7 @@ def has_content(data) -> bool:
 
 def sanitize_tag(tag: str) -> str:
     """Санітизує тег для Obsidian/Markdown."""
+    from config import TAG_LANGUAGE, RU_TO_UK_TAGS
     if not tag:
         return ""
     # Якщо tag є dict — витягти поле tag
@@ -138,6 +139,9 @@ def sanitize_tag(tag: str) -> str:
     tag = re.sub(r'[^\w\-]', '', tag)
     # Прибрати множинні дефіси
     tag = re.sub(r'-+', '-', tag).strip('-')
+    # Нормалізація мови тегів (2.4)
+    if TAG_LANGUAGE == "uk" and tag in RU_TO_UK_TAGS:
+        tag = RU_TO_UK_TAGS[tag]
     return tag
 
 
@@ -619,6 +623,38 @@ class ObsidianWriter:
             if tags_str.strip():
                 lines += ["## 🏷 Теми", tags_str, ""]
 
+        # Активність в чаті (task 11)
+        activity = data.get("activity") or {}
+        act_table = self._build_table([
+            ("Перше повідомлення", activity.get("first_seen")),
+            ("Останнє повідомлення", activity.get("last_seen")),
+            ("Кількість повідомлень", activity.get("message_count")),
+            ("Голосових повідомлень", activity.get("voice_message_count")),
+            ("Активних годин", self._join(activity.get("most_active_hours"))),
+            ("Швидкість відповіді", activity.get("reply_rate")),
+        ])
+        if act_table:
+            lines += ["## 📊 Активність в чаті", "", act_table, "", "---", ""]
+
+        # Соціальна динаміка (task 11)
+        social = data.get("social") or {}
+        social_lines = []
+        most_with = social.get("most_interacts_with") or []
+        if self._v(most_with):
+            linked = [self.resolve_link(n, "people") if isinstance(n, str) else render_item(n) for n in most_with]
+            social_lines.append(f"**Найбільше спілкується з:** {', '.join(linked)}")
+        if self._v(social.get("group_role")):
+            social_lines.append(f"**Роль в групі:** {render_item(social['group_role'])}")
+        if self._v(social.get("influence_level")):
+            social_lines.append(f"**Рівень впливу:** {render_item(social['influence_level'])}")
+        if social_lines:
+            lines += ["## 🌐 Соціальна динаміка", ""] + social_lines + ["", "---", ""]
+
+        # Timeline (task 13)
+        timeline_entries = self._build_timeline(data, activity)
+        if timeline_entries:
+            lines += ["## 📅 Хронологія", ""] + timeline_entries + ["", "---", ""]
+
         # Футер
         all_sources = self._render_sources(data.get("sources"), chat_name)
         lines += [
@@ -861,3 +897,45 @@ class ObsidianWriter:
         for label, val in valid_rows:
             lines.append(f"| {label} | {render_item(val)} |")
         return "\n".join(lines)
+
+    def _build_timeline(self, data: dict, activity: dict) -> list:
+        """Будує хронологію з key_life_events + activity dates."""
+        entries = []
+
+        # Перше повідомлення
+        first_seen = activity.get("first_seen")
+        if first_seen:
+            entries.append((first_seen, "Перше повідомлення в чаті"))
+
+        # Key life events з датами
+        for event in (data.get("key_life_events") or []):
+            event_text = render_item(event)
+            if not event_text:
+                continue
+            # Пошук дати в тексті
+            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', event_text)
+            if not date_match:
+                date_match = re.search(r'(\d{4}-\d{2})', event_text)
+            if not date_match:
+                date_match = re.search(r'(\d{4})', event_text)
+            if date_match:
+                entries.append((date_match.group(1), event_text))
+            else:
+                entries.append(("9999", event_text))
+
+        # Останнє повідомлення
+        last_seen = activity.get("last_seen")
+        if last_seen:
+            entries.append((last_seen, "Останнє повідомлення в чаті"))
+
+        if not entries:
+            return []
+
+        entries.sort(key=lambda x: x[0])
+        result = []
+        for date, text in entries:
+            if date == "9999":
+                result.append(f"- {text}")
+            else:
+                result.append(f"- {date} — {text}")
+        return result

@@ -45,10 +45,34 @@ class TelegramParser:
             return self._messages
 
         self._messages = []
+        self._service_messages = []
+        self._pinned_messages = []
         raw_messages = self.raw_data.get("messages", [])
 
+        # Побудова маппінгу id → from для resolve reply_to_name
+        id_to_author = {}
         for msg in raw_messages:
-            # Пропускаємо сервісні повідомлення
+            if msg.get("id") and msg.get("from"):
+                id_to_author[msg["id"]] = msg["from"]
+
+        for msg in raw_messages:
+            # Обробка сервісних повідомлень (join, invite, pin)
+            if msg.get("type") == "service":
+                action = msg.get("action", "")
+                service_entry = {
+                    "id": msg.get("id"),
+                    "date": msg.get("date", ""),
+                    "from_name": msg.get("actor", msg.get("from", "Unknown")),
+                    "from_id": msg.get("actor_id", msg.get("from_id", "")),
+                    "action": action,
+                    "text": self._extract_text(msg.get("text", "")),
+                    "members": msg.get("members", []),
+                }
+                self._service_messages.append(service_entry)
+                if action == "pin_message":
+                    self._pinned_messages.append(service_entry)
+                continue
+
             if msg.get("type") != "message":
                 continue
 
@@ -59,7 +83,6 @@ class TelegramParser:
             file_path = None
             raw_file = msg.get("file")
             if raw_file:
-                # Пропускаємо заглушки Telegram про невикачані файли
                 if str(raw_file).startswith("(File not included"):
                     pass
                 else:
@@ -77,6 +100,20 @@ class TelegramParser:
                 except LangDetectException:
                     pass
 
+            # Reply handling (task 10.1)
+            reply_to_id = None
+            reply_to_name = None
+            reply_data = msg.get("reply_to_message_id")
+            if reply_data:
+                reply_to_id = reply_data
+                reply_to_name = id_to_author.get(reply_data)
+
+            # Forwarded from (task 10.2)
+            forwarded_from = msg.get("forwarded_from")
+
+            # Is edited (task 10.3)
+            is_edited = bool(msg.get("edited"))
+
             normalized = {
                 "id": msg.get("id"),
                 "date": msg.get("date", ""),
@@ -88,10 +125,45 @@ class TelegramParser:
                 "duration": msg.get("duration_seconds"),
                 "transcript": None,
                 "detected_language": detected_language,
+                "reply_to_id": reply_to_id,
+                "reply_to_name": reply_to_name,
+                "forwarded_from": forwarded_from,
+                "is_edited": is_edited,
+                "is_service": False,
             }
             self._messages.append(normalized)
 
         return self._messages
+
+    def get_service_messages(self) -> list:
+        """Повертає сервісні повідомлення (join, invite, pin)."""
+        if self._messages is None:
+            self.get_messages()
+        return self._service_messages
+
+    def get_pinned_messages(self) -> list:
+        """Повертає закріплені повідомлення."""
+        if self._messages is None:
+            self.get_messages()
+        return self._pinned_messages
+
+    def get_owner(self) -> dict | None:
+        """Визначає власника чату (того хто зробив експорт)."""
+        from collections import Counter
+        messages = self.get_messages()
+        if not messages:
+            return None
+
+        from_ids = Counter(m["from_id"] for m in messages if m.get("from_id"))
+        if not from_ids:
+            return None
+
+        most_common_id, count = from_ids.most_common(1)[0]
+        most_common_name = next(
+            (m["from_name"] for m in messages if m["from_id"] == most_common_id),
+            None
+        )
+        return {"from_id": most_common_id, "from_name": most_common_name}
 
     def get_new_messages(self, since: datetime) -> list:
         """Повертає повідомлення після вказаної дати."""

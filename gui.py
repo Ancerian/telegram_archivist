@@ -50,6 +50,10 @@ PROVIDER_MODELS = {
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
     ],
+    "Gemini Full Context (1M)": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ],
     "Anthropic Claude": [
         "claude-sonnet-4-20250514",
         "claude-haiku-35-20241022",
@@ -66,6 +70,7 @@ PROVIDER_MODELS = {
 
 PROVIDER_MAP = {
     "Google Gemini": "google",
+    "Gemini Full Context (1M)": "google_full",
     "Anthropic Claude": "anthropic",
     "OpenAI": "openai",
     "LM Studio (локальна)": "local",
@@ -73,6 +78,7 @@ PROVIDER_MAP = {
 
 ENV_KEYS = {
     "Google Gemini": "GOOGLE_API_KEY",
+    "Gemini Full Context (1M)": "GOOGLE_API_KEY",
     "Anthropic Claude": "ANTHROPIC_API_KEY",
     "OpenAI": "OPENAI_API_KEY",
 }
@@ -92,10 +98,13 @@ class ArchivistGUI:
         self._start_time = None
         self._timer_id = None
         self._wait_event = None
+        self._log_filter = "all"  # all, ok, warn, err
+        self._settings_file = Path.home() / ".telegram_archivist_settings.json"
 
         self._build_style()
         self._build_ui()
         self._on_provider_change()
+        self._load_settings()
 
     # ─── Стиль ──────────────────────────────────────────────
 
@@ -345,7 +354,18 @@ class ArchivistGUI:
         log_pane = ttk.Frame(main_container)
         log_pane.pack(side="right", fill="both", expand=True, padx=(20, 0))
         
-        self._section(log_pane, "📜  Лог подій")
+        # Заголовок + фільтри
+        log_header = ttk.Frame(log_pane)
+        log_header.pack(fill="x")
+        self._section(log_header, "📜  Лог подій")
+        
+        filter_frame = ttk.Frame(log_header)
+        filter_frame.pack(side="right", padx=8, pady=(14, 2))
+        for label, ftype in [("Всі", "all"), ("✅", "ok"), ("⚠️", "warn"), ("❌", "err")]:
+            btn = ttk.Button(filter_frame, text=label, style="Browse.TButton",
+                             command=lambda f=ftype: self._apply_log_filter(f))
+            btn.pack(side="left", padx=2)
+
         self.log = scrolledtext.ScrolledText(
             log_pane, wrap="word",
             bg="#020617", fg=FG, insertbackground=FG,
@@ -360,6 +380,14 @@ class ArchivistGUI:
         self.log.tag_config("warn", foreground=FG_WARN)
         self.log.tag_config("err", foreground=FG_ERR)
         self.log.tag_config("accent", foreground=FG_ACCENT)
+
+        # Кнопки утиліт під логом
+        util_frame = ttk.Frame(log_pane)
+        util_frame.pack(fill="x", pady=(4, 0))
+        ttk.Button(util_frame, text="🏥 Health Check", style="Browse.TButton",
+                   command=self._run_health_check).pack(side="left", padx=4)
+        ttk.Button(util_frame, text="📂 Відкрити Vault", style="Browse.TButton",
+                   command=self._open_vault).pack(side="left", padx=4)
 
     # ─── Хелпери UI ─────────────────────────────────────────
 
@@ -511,7 +539,16 @@ class ArchivistGUI:
     # ─── Запуск ─────────────────────────────────────────────
 
     def _log_write(self, text, tag=None):
-        """Безпечний запис у лог з головного потоку."""
+        """Безпечний запис у лог з головного потоку з фільтрацією."""
+        # Зберігаємо всі записи для replay при зміні фільтра
+        if not hasattr(self, '_log_entries'):
+            self._log_entries = []
+        self._log_entries.append((text, tag))
+
+        # Перевіряємо фільтр
+        if self._log_filter != "all" and tag and tag != self._log_filter:
+            return
+
         def _write():
             self.log.configure(state="normal")
             if tag:
@@ -521,6 +558,23 @@ class ArchivistGUI:
             self.log.see("end")
             self.log.configure(state="disabled")
         self.root.after(0, _write)
+
+    def _apply_log_filter(self, filter_type: str):
+        """Застосовує фільтр до логу (all/ok/warn/err)."""
+        self._log_filter = filter_type
+        # Перемалювуємо лог
+        def _rewrite():
+            self.log.configure(state="normal")
+            self.log.delete("1.0", "end")
+            for text, tag in getattr(self, '_log_entries', []):
+                if filter_type == "all" or not tag or tag == filter_type:
+                    if tag:
+                        self.log.insert("end", text + "\n", tag)
+                    else:
+                        self.log.insert("end", text + "\n")
+            self.log.see("end")
+            self.log.configure(state="disabled")
+        self.root.after(0, _rewrite)
 
     def _set_status(self, text, color=FG_DIM):
         self.root.after(0, lambda: self.status_label.configure(text=text, foreground=color))
@@ -584,6 +638,7 @@ class ArchivistGUI:
         sys.exit(0)
 
     def _start(self):
+        self._save_settings()
         # Валідація
         input_path = Path(self.input_var.get().strip())
         vault_path = Path(self.vault_var.get().strip())
@@ -896,7 +951,10 @@ class ArchivistGUI:
                 absolute_max_tokens=absolute_max_tokens,
                 use_cot=use_cot,
             )
-            analyzed_entities = analyzer.analyze(messages, known_entities, checkpoint_path=checkpoint_path)
+            if provider == "google_full":
+                analyzed_entities = analyzer.analyze_full_context(messages, known_entities, checkpoint_path=checkpoint_path)
+            else:
+                analyzed_entities = analyzer.analyze(messages, known_entities, checkpoint_path=checkpoint_path)
             summary_messages = analyzer.last_analyzed_messages or messages
             summary_text = analyzer.generate_chat_summary(summary_messages, analyzed_entities)
             if summary_text:
@@ -976,6 +1034,7 @@ class ArchivistGUI:
             self._log_write("═" * 50, "ok")
 
             self._set_status("✅ 100 % — Готово!", FG_OK)
+            self._notify_completion(success=True)
 
             # Фіксуємо фінальний час
             elapsed = time.time() - self._start_time
@@ -988,12 +1047,111 @@ class ArchivistGUI:
             import traceback
             self._log_write(traceback.format_exc(), "err")
             self._set_status("❌ Помилка", FG_ERR)
+            self._notify_completion(success=False)
 
         finally:
             self._running = False
             self._stop_timer()
             self.root.after(0, lambda: self.start_btn.state(["!disabled"]))
             self.root.after(0, lambda: self.stop_btn.state(["disabled"]))
+
+    # ─── Settings Persistence (6.2) ─────────────────────────
+
+    def _save_settings(self):
+        """Зберігає налаштування в JSON файл."""
+        import json
+        try:
+            settings = {
+                "input_path": self.input_var.get() if hasattr(self, 'input_var') else "",
+                "vault_path": self.vault_var.get() if hasattr(self, 'vault_var') else "",
+                "provider": self.provider_var.get() if hasattr(self, 'provider_var') else "",
+                "model": self.model_var.get() if hasattr(self, 'model_var') else "",
+                "max_tokens": self.tokens_var.get() if hasattr(self, 'tokens_var') else "128000",
+                "concurrency": self.concurrent_var.get() if hasattr(self, 'concurrent_var') else "3",
+            }
+            with open(self._settings_file, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_settings(self):
+        """Завантажує збережені налаштування."""
+        import json
+        try:
+            if not self._settings_file.exists():
+                return
+            with open(self._settings_file, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            if settings.get("input_path") and hasattr(self, 'input_var'):
+                self.input_var.set(settings["input_path"])
+            if settings.get("vault_path") and hasattr(self, 'vault_var'):
+                self.vault_var.set(settings["vault_path"])
+            if settings.get("provider") and hasattr(self, 'provider_var'):
+                self.provider_var.set(settings["provider"])
+                self._on_provider_change()
+            if settings.get("model") and hasattr(self, 'model_var'):
+                self.model_var.set(settings["model"])
+            if settings.get("max_tokens") and hasattr(self, 'tokens_var'):
+                self.tokens_var.set(settings["max_tokens"])
+            if settings.get("concurrency") and hasattr(self, 'concurrent_var'):
+                self.concurrent_var.set(settings["concurrency"])
+        except Exception:
+            pass
+
+    # ─── Health Check (17) ──────────────────────────────────
+
+    def _run_health_check(self):
+        """Запускає перевірку системи і виводить результати в лог."""
+        from health_check import SystemHealthCheck
+        self._log_write("\n🏥 Перевірка системи...\n", "accent")
+        checker = SystemHealthCheck()
+        config = {
+            "provider": PROVIDER_MAP.get(self.provider_var.get(), ""),
+            "local_url": self.local_url_var.get() if hasattr(self, 'local_url_var') else "",
+            "vault_path": self.vault_var.get() if hasattr(self, 'vault_var') else "",
+            "input_path": self.input_var.get() if hasattr(self, 'input_var') else "",
+        }
+        results = checker.run_all(config)
+        all_ok = True
+        for r in results:
+            icon = "✅" if r["ok"] else ("❌" if r.get("critical") else "⚠️")
+            tag = "ok" if r["ok"] else ("err" if r.get("critical") else "warn")
+            self._log_write(f"  {icon} {r['name']}: {r['detail']}", tag)
+            if not r["ok"]:
+                all_ok = False
+        if all_ok:
+            self._log_write("\n✅ Всі перевірки пройдені!", "ok")
+        else:
+            self._log_write("\n⚠️ Є проблеми, перевірте вище.", "warn")
+
+    # ─── Open Vault (6.4) ──────────────────────────────────
+
+    def _open_vault(self):
+        """Відкриває vault у файловому менеджері."""
+        vault_path = self.vault_var.get() if hasattr(self, 'vault_var') else ""
+        if not vault_path or not Path(vault_path).exists():
+            self._log_write("⚠️ Vault не знайдено", "warn")
+            return
+        import subprocess
+        try:
+            subprocess.Popen(["open", vault_path])
+        except Exception as e:
+            self._log_write(f"⚠️ Не вдалося відкрити: {e}", "warn")
+
+    # ─── Notification (6.3) ─────────────────────────────────
+
+    def _notify_completion(self, success: bool = True):
+        """Нотифікація про завершення через macOS AppleScript."""
+        try:
+            import subprocess
+            title = "✅ Аналіз завершено" if success else "❌ Аналіз не вдався"
+            msg = "Telegram Archivist завершив обробку."
+            subprocess.run([
+                "osascript", "-e",
+                f'display notification "{msg}" with title "{title}" sound name "Glass"'
+            ], capture_output=True, timeout=5)
+        except Exception:
+            pass
 
     # ─── Запуск ─────────────────────────────────────────────
 

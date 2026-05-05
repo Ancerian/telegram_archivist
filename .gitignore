@@ -6,12 +6,18 @@ __pycache__/
 env/
 venv/
 ENV/
+.pytest_cache/
 
 # macOS
 .DS_Store
 
+# IDEs
+.idea/
+.vscode/
+
 # Sensitive info
 .env
+.env.local
 
 # Data & Exports (Telegram exports)
 # Usually you don't want to commit large chat exports
@@ -20,10 +26,13 @@ result.json
 *.json
 !config.json
 !*.example.json
+_registry.json
+checkpoint.json
 
 # Local artifacts/vaults
 /vault/
 /archivist_vault/
+/output/
 
 # Logs
 *.log
@@ -34,10 +43,12 @@ logs/
 /.cache/
 
 # Media
-gui_screenshot.png
 *.png
 *.jpg
 *.jpeg
 *.mp3
 *.ogg
 *.mp4
+
+# Test files with personal mentions
+tests/

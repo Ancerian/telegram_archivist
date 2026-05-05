@@ -7,3 +7,7 @@ requests
 python-dotenv
 tiktoken  # optional, для точного підрахунку токенів OpenAI
 pytest  # для unit-тестів
+jinja2  # optional, для шаблонів Obsidian
+psutil  # optional, для health check RAM
+# faiss-cpu  # optional, для векторного пошуку
+# sentence-transformers  # optional, для векторного пошуку

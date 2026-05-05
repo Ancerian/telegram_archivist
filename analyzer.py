@@ -8,7 +8,11 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime, timezone
-from config import SYSTEM_PROMPT, normalize_name
+from config import (
+    SYSTEM_PROMPT, normalize_name,
+    MAX_KNOWN_PEOPLE, MAX_KNOWN_PROJECTS, MAX_KNOWN_EVENTS, MAX_KNOWN_THEMES,
+    COT_OUTPUT_OVERHEAD, INCREMENTAL_SAVE_EVERY, RESPONSE_TIME_THRESHOLD,
+)
 
 
 class SmartBatcher:
@@ -204,6 +208,9 @@ class EntityAnalyzer:
             "themes": [],
         }
         processed_batch_nums = set()
+        batch_statuses = {}  # {batch_num: "pending"|"processing"|"done"|"failed"}
+        response_times = []  # для динамічної паралельності
+        previous_batch_summary = None  # для передачі контексту між батчами
         checkpoint = self._load_checkpoint(checkpoint_path)
         previous_last_processed_date = checkpoint.get("last_processed_date")
 
@@ -290,14 +297,16 @@ class EntityAnalyzer:
                         "last_processed_date": previous_last_processed_date,
                         "accumulated": accumulated,
                         "processed_batches": list(processed_batch_nums),
+                        "batch_statuses": batch_statuses,
                     }, f, ensure_ascii=False, indent=2)
             except Exception: pass
 
         def _process_batch(batch_tuple, depth=0):
             b_num, batch = batch_tuple
             max_retries = 3
+            batch_statuses[b_num] = "processing"
 
-            user_message = self._build_user_message(batch, known_entities, messages)
+            user_message = self._build_user_message(batch, known_entities, messages, previous_summary=previous_batch_summary)
 
             for attempt in range(max_retries):
                 if self.is_running_callback and not self.is_running_callback(): return None
@@ -324,8 +333,11 @@ class EntityAnalyzer:
                         if parsed:
                             return self._audit_attribution(parsed, batch)
                 except Exception as e:
-                    err_str = str(e).lower()
-                    if ("context size" in err_str or "context length" in err_str or "context window" in err_str) and len(batch) > 1:
+                    if self._is_context_error(e) and len(batch) > 1:
+                        est_tokens = sum(SmartBatcher._estimate_tokens(m, self.provider) for m in batch)
+                        msg = f"  ⚠️ Батч {b_num}: контекст переповнено (~{est_tokens} токенів), ділю на 2"
+                        print(msg)
+                        if self.progress_callback: self.progress_callback(msg)
                         mid = len(batch) // 2
                         res1 = _process_batch((b_num, batch[:mid]), depth + 1)
                         res2 = _process_batch((b_num, batch[mid:]), depth + 1)
@@ -340,46 +352,62 @@ class EntityAnalyzer:
             return None
 
         def run_queue(queue_batches, force_max=None):
-            nonlocal processed_batch_nums
+            nonlocal processed_batch_nums, previous_batch_summary
             if not queue_batches: return
 
             def get_current_max():
                 if force_max is not None: return force_max
+                # Динамічна паралельність (3.1)
+                if response_times and len(response_times) >= 3:
+                    avg_time = sum(response_times[-5:]) / len(response_times[-5:])
+                    if avg_time > RESPONSE_TIME_THRESHOLD:
+                        return 1
                 if callable(self.max_concurrent): return max(1, int(self.max_concurrent()))
                 return max(1, int(self.max_concurrent))
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
-                future_to_num = {}
+                future_to_batch = {}  # future -> (b_num, batch)
                 batch_iter = iter(queue_batches)
                 batch_iter_exhausted = False
 
                 while True:
                     if self.is_running_callback and not self.is_running_callback(): break
 
-                    for f in list(future_to_num.keys()):
+                    for f in list(future_to_batch.keys()):
                         if f.done():
-                            b_num = future_to_num.pop(f)
+                            b_num, batch_msgs = future_to_batch.pop(f)
                             try:
                                 parsed = f.result()
                                 if parsed:
                                     self._accumulate(accumulated, parsed)
-                                    if self.progress_callback: self.progress_callback(f"  ✅ Батч {b_num} оброблено")
+                                    batch_statuses[b_num] = "done"
+                                    previous_batch_summary = self._generate_batch_summary(parsed, batch_msgs)
+                                    if self.progress_callback:
+                                        msg = f"  ✅ Батч {b_num} оброблено успішно"
+                                        self.progress_callback(msg)
+                                else:
+                                    batch_statuses[b_num] = "failed"
+                                    if self.progress_callback:
+                                        self.progress_callback(f"  ⚠️ Батч {b_num} не повернув корисних даних")
                                 processed_batch_nums.add(b_num)
                                 _save_checkpoint()
                             except Exception as e:
-                                print(f"  ❌ Помилка у батчі {b_num}: {e}")
+                                batch_statuses[b_num] = "failed"
+                                print(f"  ❌ Критична помилка у батчі {b_num}: {e}")
 
                     if not batch_iter_exhausted:
-                        while len(future_to_num) < get_current_max():
+                        while len(future_to_batch) < get_current_max():
                             try:
                                 next_batch = next(batch_iter)
+                                batch_statuses[next_batch[0]] = "pending"
+                                t_start = time.time()
                                 fut = executor.submit(_process_batch, next_batch)
-                                future_to_num[fut] = next_batch[0]
+                                future_to_batch[fut] = next_batch
                             except StopIteration:
                                 batch_iter_exhausted = True
                                 break
 
-                    if batch_iter_exhausted and not future_to_num: break
+                    if batch_iter_exhausted and not future_to_batch: break
                     time.sleep(0.1)
 
         run_queue(batches)
@@ -454,7 +482,88 @@ class EntityAnalyzer:
             if self.progress_callback:
                 self.progress_callback(msg)
 
-    def _build_user_message(self, batch: list, known_entities: dict, all_messages: list = None) -> str:
+    def _is_context_error(self, error: Exception | str) -> bool:
+        """Гнучка перевірка чи помилка пов'язана з переповненням контексту."""
+        error_str = str(error).lower()
+        if "400" in error_str or "429" in error_str:
+            context_keywords = [
+                "context", "length", "window", "limit", "memory",
+                "token", "exceed", "too long", "maximum", "перевищ",
+                "контекст", "довжина"
+            ]
+            if any(kw in error_str for kw in context_keywords):
+                return True
+        direct_keywords = [
+            "context size has been exceeded", "context length exceeded",
+            "context window", "maximum context", "token limit", "input too long"
+        ]
+        return any(kw in error_str for kw in direct_keywords)
+
+    def _get_relevant_entities(self, batch: list, known_entities: dict) -> dict:
+        """Фільтрує known_entities до релевантних для поточного батчу."""
+        batch_names = set(msg.get("from_name", "") for msg in batch if msg.get("from_name"))
+        batch_text = " ".join(
+            (msg.get("text") or "") + " " + (msg.get("transcript") or "")
+            for msg in batch
+        ).lower()
+
+        relevant_people = []
+        for name in known_entities.get("known_people", []):
+            canonical = name.split("(")[0].strip().lower()
+            if canonical in batch_text or any(
+                author.lower() in canonical or canonical in author.lower()
+                for author in batch_names
+            ):
+                relevant_people.append(name)
+
+        if len(relevant_people) < MAX_KNOWN_PEOPLE:
+            remaining = [p for p in known_entities.get("known_people", [])
+                         if p not in relevant_people]
+            relevant_people.extend(remaining[:MAX_KNOWN_PEOPLE - len(relevant_people)])
+
+        return {
+            "known_people": relevant_people[:MAX_KNOWN_PEOPLE],
+            "known_projects": known_entities.get("known_projects", [])[:MAX_KNOWN_PROJECTS],
+            "known_events": known_entities.get("known_events", [])[:MAX_KNOWN_EVENTS],
+            "known_themes": known_entities.get("known_themes", [])[:MAX_KNOWN_THEMES],
+        }
+
+    @staticmethod
+    def _calculate_activity_stats(person_name: str, telegram_id: str, all_messages: list) -> dict:
+        """Розраховує статистику активності з повідомлень."""
+        from collections import Counter
+        person_msgs = [
+            m for m in all_messages
+            if m.get("from_name") == person_name or m.get("from_id") == telegram_id
+        ]
+        if not person_msgs:
+            return {}
+
+        dates = [m["date"] for m in person_msgs if m.get("date")]
+        hours = [m["date"][11:13] for m in person_msgs if m.get("date") and len(m["date"]) > 12]
+
+        return {
+            "first_seen": min(dates)[:10] if dates else None,
+            "last_seen": max(dates)[:10] if dates else None,
+            "message_count": len(person_msgs),
+            "voice_message_count": sum(
+                1 for m in person_msgs if m.get("media_type") == "voice_message"
+            ),
+            "most_active_hours": [h for h, _ in Counter(hours).most_common(3)] if hours else [],
+        }
+
+    def _generate_batch_summary(self, result: dict, batch: list) -> str:
+        """Генерує короткий summary батчу для контексту наступного."""
+        people = [p["name"] for p in result.get("people", []) if isinstance(p, dict) and p.get("name")]
+        period = batch[0]["date"][:10] if batch and batch[0].get("date") else ""
+        return (
+            f"Попередній фрагмент ({period}): "
+            f"Учасники: {', '.join(people[:5])}. "
+            f"Проєктів: {len(result.get('projects', []))}. "
+            f"Подій: {len(result.get('events', []))}."
+        )
+
+    def _build_user_message(self, batch: list, known_entities: dict, all_messages: list = None, previous_summary: str = None) -> str:
         """Будує user message з додаванням контексту відомих сутностей."""
         all_messages = all_messages or batch
         participants = sorted(set(m["from_name"] for m in all_messages if m.get("from_name") and m["from_name"] != "Unknown"))
@@ -518,10 +627,22 @@ class EntityAnalyzer:
 
         messages_text = "\n\n".join(lines)
 
-        # Додаємо списки відомих сутностей для запобігання дублікатів (обмежуємо до 100 останніх, щоб не переповнити контекст)
-        known_people = ", ".join(known_entities.get("known_people", [])[-100:])
-        known_projects = ", ".join(known_entities.get("known_projects", [])[-100:])
-        known_themes = ", ".join(known_entities.get("known_themes", [])[-100:])
+        # Фільтруємо відомі сутності до релевантних для цього батчу (1.3)
+        relevant = self._get_relevant_entities(batch, known_entities)
+        known_people = ", ".join(relevant.get("known_people", []))
+        known_projects = ", ".join(relevant.get("known_projects", []))
+        known_themes = ", ".join(relevant.get("known_themes", []))
+
+        # Логуємо розмір реєстру в промпті
+        reg_tokens = len(f"{known_people} {known_projects} {known_themes}".split())
+        msg = f"  📋 Реєстр в промпті: {len(relevant.get('known_people', []))} людей, {len(relevant.get('known_projects', []))} проєктів, {len(relevant.get('known_themes', []))} тегів (~{int(reg_tokens * 1.3)} токенів)"
+        print(msg)
+        if self.progress_callback:
+            self.progress_callback(msg)
+
+        summary_block = ""
+        if previous_summary:
+            summary_block = f"\nКонтекст з попереднього фрагменту: {previous_summary}"
 
         return f"""ВЖЕ ВІДОМІ СУТНОСТІ (використовуй ці назви, не створюй дублікати):
 Люди: {known_people}
@@ -533,7 +654,7 @@ class EntityAnalyzer:
 Учасники: {', '.join(participants)}
 
 Повідомлення:
-{messages_text}"""
+{messages_text}{summary_block}"""
 
     def _call_llm(self, user_message: str, is_cot_stage: bool = False, system_override: str = None) -> str:
         """Викликає LLM провайдер."""
@@ -580,7 +701,43 @@ class EntityAnalyzer:
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user_message}],
             )
             return response.choices[0].message.content
+        elif self.provider == "google_full":
+            # Gemini Full Context — 1M tokens (task 4.1)
+            import google.generativeai as genai
+            genai.configure(api_key=self.api_key)
+            model = genai.GenerativeModel(self.model or "gemini-2.5-flash")
+            return model.generate_content(system + "\n\n" + user_message).text
         return ""
+
+    def analyze_full_context(self, messages: list, known_entities: dict, checkpoint_path: Path = None) -> dict:
+        """
+        Аналіз через Gemini Full Context — один запит на весь чат.
+        Обходить SmartBatcher, використовує весь контекст моделі.
+        """
+        self.last_analyzed_messages = messages
+
+        msg = f"📊 Gemini Full Context: {len(messages)} повідомлень одним запитом"
+        print(msg)
+        if self.progress_callback:
+            self.progress_callback(msg)
+
+        user_message = self._build_user_message(messages, known_entities, messages)
+
+        try:
+            response_text = self._call_llm(user_message)
+            if response_text:
+                parsed = self._validate_and_fix(response_text, 1, user_message, messages)
+                if parsed:
+                    result = self._audit_attribution(parsed, messages)
+                    self._write_completion_checkpoint(checkpoint_path, messages)
+                    return result
+        except Exception as e:
+            msg = f"  ❌ Помилка Gemini Full Context: {e}"
+            print(msg, file=sys.stderr)
+            if self.progress_callback:
+                self.progress_callback(msg)
+
+        return {"people": [], "projects": [], "events": [], "themes": []}
 
     def generate_chat_summary(self, messages: list, entities: dict) -> str | None:
         """Генерує коротке зведення чату без блокування основного pipeline."""
@@ -789,3 +946,37 @@ class EntityAnalyzer:
         from merger import merge_entity_data
         merged = merge_entity_data(existing, new)
         existing.update(merged)
+
+    @staticmethod
+    def consolidate_entity_facts(entity: dict, max_facts: int = 50) -> dict:
+        """Консолідує факти якщо їх більше max_facts (task 2.2).
+        Видаляє дублікати та коротші форми, залишаючи max_facts унікальних."""
+        facts = entity.get("facts") or []
+        if len(facts) <= max_facts:
+            return entity
+
+        # Дедуплікація: прибрати факти які є підстроками інших
+        unique_facts = []
+        normalized = [str(f).lower().strip() for f in facts]
+        for i, fact in enumerate(facts):
+            is_substring = False
+            for j, other in enumerate(normalized):
+                if i != j and normalized[i] in other and len(normalized[i]) < len(other):
+                    is_substring = True
+                    break
+            if not is_substring:
+                unique_facts.append(fact)
+
+        # Якщо після дедупу > max_facts — обрізаємо, пріоритет довшим (більш деталізованим)
+        if len(unique_facts) > max_facts:
+            unique_facts.sort(key=lambda f: len(str(f)), reverse=True)
+            unique_facts = unique_facts[:max_facts]
+
+        entity["facts"] = unique_facts
+
+        # Те саме для notable_quotes
+        quotes = entity.get("notable_quotes") or []
+        if len(quotes) > 10:
+            entity["notable_quotes"] = quotes[:10]
+
+        return entity
