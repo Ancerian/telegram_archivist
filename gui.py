@@ -45,27 +45,36 @@ FONT_SM      = ("SF Pro Display", 11)
 
 PROVIDER_MODELS = {
     "Google Gemini": [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
         "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash-lite-preview-02-05",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-2.0-pro-exp-02-05",
     ],
     "Gemini Full Context (1M)": [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
     ],
     "Anthropic Claude": [
-        "claude-sonnet-4-20250514",
-        "claude-haiku-35-20241022",
         "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-opus-20240229",
+        "claude-3-sonnet-20240229",
+        "claude-3-haiku-20240307",
     ],
     "OpenAI": [
-        "gpt-4.1",
-        "gpt-4.1-mini",
+        "o1-preview",
+        "o1-mini",
         "gpt-4o",
         "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo",
     ],
-    "LM Studio (локальна)": [],
+    "LM Studio (локальна)": [
+        "local-model",
+    ],
 }
 
 PROVIDER_MAP = {
